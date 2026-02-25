@@ -26,12 +26,13 @@ IMG_HEIGHT = 64
 IMG_WIDTH = 160
 CAPTCHA_LEN = 5
 BATCH_SIZE = 32
-EPOCHS = 150
+EPOCHS = 200
 LR = 1e-3
-TRAIN_RATIO = 0.8
 SEED = 42
 
-DATA_DIR = Path("ProcessedCaptchas")
+TRAIN_DIR = Path("data/train")
+VAL_DIR = Path("data/val")
+TEST_DIR = Path("data/test")
 OUTPUT_DIR = Path("output")
 OUTPUT_DIR.mkdir(exist_ok=True)
 
@@ -224,37 +225,35 @@ def evaluate(model, dataloader, device):
     return full_acc, char_acc
 
 
+def load_split(split_dir):
+    """Load image paths and labels from a split directory."""
+    files = sorted(Path(split_dir).glob("*.png"))
+    paths = [str(f) for f in files]
+    labels = [f.stem for f in files]
+    for label in labels:
+        assert len(label) == CAPTCHA_LEN, f"Bad label length: {label}"
+        for c in label:
+            assert c in CHAR_TO_IDX, f"Unknown char '{c}' in label '{label}'"
+    return paths, labels
+
+
 def train():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Device: {device}")
 
-    # Load dataset
-    all_files = sorted(DATA_DIR.glob("*.png"))
-    all_paths = [str(f) for f in all_files]
-    all_labels = [f.stem for f in all_files]
+    # Load pre-split datasets
+    train_paths, train_labels = load_split(TRAIN_DIR)
+    val_paths, val_labels = load_split(VAL_DIR)
+    test_paths, test_labels = load_split(TEST_DIR)
 
-    for label in all_labels:
-        assert len(label) == CAPTCHA_LEN, f"Bad label length: {label}"
-        for c in label:
-            assert c in CHAR_TO_IDX, f"Unknown char '{c}' in label '{label}'"
-
-    # Split (same seed as v1 for fair comparison)
-    indices = list(range(len(all_paths)))
-    random.shuffle(indices)
-    split = int(len(indices) * TRAIN_RATIO)
-    train_idx, test_idx = indices[:split], indices[split:]
-
-    train_paths = [all_paths[i] for i in train_idx]
-    train_labels = [all_labels[i] for i in train_idx]
-    test_paths = [all_paths[i] for i in test_idx]
-    test_labels = [all_labels[i] for i in test_idx]
-
-    print(f"Train: {len(train_paths)}, Test: {len(test_paths)}")
+    print(f"Train: {len(train_paths)}, Val: {len(val_paths)}, Test: {len(test_paths)}")
 
     train_ds = CaptchaDataset(train_paths, train_labels, augment=True)
+    val_ds = CaptchaDataset(val_paths, val_labels, augment=False)
     test_ds = CaptchaDataset(test_paths, test_labels, augment=False)
 
     train_loader = DataLoader(train_ds, batch_size=BATCH_SIZE, shuffle=True, num_workers=0)
+    val_loader = DataLoader(val_ds, batch_size=BATCH_SIZE, shuffle=False, num_workers=0)
     test_loader = DataLoader(test_ds, batch_size=BATCH_SIZE, shuffle=False, num_workers=0)
 
     # Model
@@ -267,8 +266,10 @@ def train():
     criterion = nn.CrossEntropyLoss()
 
     # Training loop
-    history = {"train_loss": [], "test_full_acc": [], "test_char_acc": []}
+    history = {"train_loss": [], "val_full_acc": [], "val_char_acc": []}
     best_acc = 0.0
+    patience = 30
+    epochs_no_improve = 0
 
     for epoch in range(1, EPOCHS + 1):
         model.train()
@@ -296,28 +297,44 @@ def train():
         avg_loss = epoch_loss / num_batches
 
         if epoch % 5 == 0 or epoch == 1:
-            full_acc, char_acc = evaluate(model, test_loader, device)
+            # Evaluate on VALIDATION set for model selection
+            full_acc, char_acc = evaluate(model, val_loader, device)
             history["train_loss"].append(avg_loss)
-            history["test_full_acc"].append(full_acc)
-            history["test_char_acc"].append(char_acc)
+            history["val_full_acc"].append(full_acc)
+            history["val_char_acc"].append(char_acc)
 
             print(f"Epoch {epoch:3d}/{EPOCHS} | Loss: {avg_loss:.4f} | "
-                  f"Full Acc: {full_acc:.1%} | Char Acc: {char_acc:.1%} | "
+                  f"Val Full: {full_acc:.1%} | Val Char: {char_acc:.1%} | "
                   f"LR: {scheduler.get_last_lr()[0]:.6f}")
 
             if full_acc > best_acc:
                 best_acc = full_acc
+                epochs_no_improve = 0
                 torch.save(model.state_dict(), OUTPUT_DIR / "best_model_v2.pth")
                 print(f"  -> New best model saved! ({best_acc:.1%})")
+            else:
+                epochs_no_improve += 5
 
-    # Final evaluation with best model
+            if epochs_no_improve >= patience:
+                print(f"  Early stopping: no improvement for {patience} epochs")
+                break
+
+    # Final evaluation with best model on HELD-OUT TEST set
     model.load_state_dict(torch.load(OUTPUT_DIR / "best_model_v2.pth", weights_only=True))
-    full_acc, char_acc = evaluate(model, test_loader, device)
+
+    val_full, val_char = evaluate(model, val_loader, device)
+    test_full, test_char = evaluate(model, test_loader, device)
+    train_full, train_char = evaluate(model, train_loader, device)
+
     print(f"\n{'='*60}")
     print(f"BEST MODEL RESULTS (v2 - Multi-Head):")
-    print(f"  Full captcha accuracy: {full_acc:.1%}")
-    print(f"  Per-character accuracy: {char_acc:.1%}")
+    print(f"  Train accuracy: {train_full:.1%} full | {train_char:.1%} char")
+    print(f"  Val accuracy:   {val_full:.1%} full | {val_char:.1%} char")
+    print(f"  Test accuracy:  {test_full:.1%} full | {test_char:.1%} char")
     print(f"{'='*60}")
+    print(f"\n  ** Test accuracy is the TRUE generalization metric **")
+    if train_full - test_full > 0.2:
+        print(f"  [!] Large train-test gap ({train_full - test_full:.1%}) suggests overfitting")
 
     # Save training plot
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 4))
@@ -328,9 +345,10 @@ def train():
     ax1.set_xlabel("Eval Step")
     ax1.set_ylabel("CE Loss")
 
-    ax2.plot(epochs_eval, history["test_full_acc"], "g-", label="Full Captcha")
-    ax2.plot(epochs_eval, history["test_char_acc"], "r-", label="Per-Char")
-    ax2.set_title("Test Accuracy")
+    ax2.plot(epochs_eval, history["val_full_acc"], "g-", label="Val Full")
+    ax2.plot(epochs_eval, history["val_char_acc"], "r-", label="Val Char")
+    ax2.axhline(y=test_full, color="g", linestyle="--", alpha=0.5, label=f"Test Full ({test_full:.0%})")
+    ax2.set_title("Accuracy")
     ax2.set_xlabel("Eval Step")
     ax2.set_ylabel("Accuracy")
     ax2.legend()
@@ -340,8 +358,8 @@ def train():
     plt.savefig(OUTPUT_DIR / "training_plot_v2.png", dpi=100)
     print(f"Training plot saved to {OUTPUT_DIR / 'training_plot_v2.png'}")
 
-    # Error analysis
-    print(f"\nError Analysis (misclassified test samples):")
+    # Error analysis on held-out test set
+    print(f"\nError Analysis (misclassified TEST samples):")
     model.eval()
     errors = []
     with torch.no_grad():
@@ -359,10 +377,10 @@ def train():
 
     if errors:
         print(f"  Total errors: {len(errors)}/{len(test_paths)}")
-        for true, pred, diff in errors[:20]:
+        for true, pred, diff in errors[:30]:
             print(f"  True: {true} | Pred: {pred} | {diff}")
     else:
-        print("  No errors! Perfect accuracy.")
+        print("  No errors on test set! Perfect accuracy.")
 
     # Export to ONNX
     print(f"\nExporting to ONNX...")
@@ -382,12 +400,12 @@ def train():
         onnx_size += os.path.getsize(data_file)
     print(f"ONNX model saved: {onnx_path} ({onnx_size / 1024 / 1024:.1f} MB)")
 
-    return best_acc
+    return test_full
 
 
 if __name__ == "__main__":
-    best = train()
-    if best < 0.9:
-        print(f"\n[!] Accuracy {best:.1%} < 90% target. Further tuning needed.")
+    test_acc = train()
+    if test_acc < 0.9:
+        print(f"\n[!] Test accuracy {test_acc:.1%} < 90% target. Further tuning needed.")
     else:
-        print(f"\n[OK] Accuracy {best:.1%} >= 90% target!")
+        print(f"\n[OK] Test accuracy {test_acc:.1%} >= 90% target!")
