@@ -1,13 +1,15 @@
 # Captcha Solver
 
-A lightweight captcha recognition model achieving **99% accuracy** on 5-character alphanumeric captchas, trained on just 500 images.
+A lightweight captcha recognition model achieving **98.7% accuracy** on 5-character alphanumeric captchas, trained on just 500 images with a proper train/val/test split.
 
 ## Results
 
 | Metric | Value |
 |---|---|
-| Full captcha accuracy (held-out test) | **99.0%** |
-| Per-character accuracy | **99.8%** |
+| Train accuracy | **99.4%** (350 images) |
+| Validation accuracy | **100.0%** (75 images) |
+| Test accuracy (held-out) | **98.7%** (75 images) |
+| Per-character accuracy (test) | **99.7%** |
 | Model size (ONNX) | **5.1 MB** |
 | Inference runtime | ONNX Runtime (CPU) |
 | Character set | `23456789ABCDEFGHJKLMNPQRSTUVWXYZ` (32 chars) |
@@ -41,6 +43,10 @@ uv run python inference.py ProcessedCaptchas/
 ### Train
 
 ```bash
+# Step 1: Split dataset into train/val/test folders
+uv run python split_dataset.py
+
+# Step 2: Train (uses data/train for training, data/val for model selection)
 uv run python train_v2.py
 ```
 
@@ -78,6 +84,15 @@ ProcessedCaptchas/
   ...
 ```
 
+Run `uv run python split_dataset.py` to create the train/val/test split:
+
+```
+data/
+  train/    # 350 images (70%) — used for gradient updates
+  val/      #  75 images (15%) — used for model selection (best checkpoint)
+  test/     #  75 images (15%) — held-out, evaluated only at the end
+```
+
 Requirements:
 - Grayscale or RGB PNG images
 - Exactly 5 characters per label
@@ -87,14 +102,19 @@ Requirements:
 
 ```
 captcha_finetune/
-  ProcessedCaptchas/        # Dataset (500 labeled images)
+  ProcessedCaptchas/        # Raw dataset (500 labeled images)
+  data/
+    train/                  # Training split (350 images)
+    val/                    # Validation split (75 images)
+    test/                   # Held-out test split (75 images)
   output/
     best_model_v2.pth       # Trained PyTorch weights
     captcha_model_v2.onnx   # ONNX model for deployment
     training_plot_v2.png    # Training curves
-  train_v2.py               # Training script
+  split_dataset.py          # Dataset splitter
+  train_v2.py               # Training script (multi-head CNN)
   inference.py              # ONNX inference script
-  export_onnx.py            # Standalone ONNX export
+  export_onnx.py            # Standalone ONNX export (v1, legacy)
   GUIDELINE.md              # Detailed step-by-step development guide
   pyproject.toml            # Dependencies
 ```
